@@ -20,7 +20,6 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
-
 #include <srs_core.hpp>
 
 #include <stdlib.h>
@@ -30,6 +29,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 using namespace std;
 
 #include <srs_kernel_error.hpp>
@@ -50,7 +55,102 @@ using namespace std;
 #include <srs_rtmp_amf0.hpp>
 #include <srs_raw_avc.hpp>
 #include <srs_app_http_conn.hpp>
+#include <pthread.h>  
+#include <iostream>  
+#include <string.h>  
+#include <srs_app_thread.hpp>
+#include <srs_app_listener.hpp>
 
+using std::cout;  
+using std::endl;  
+const int QUEUESIZE = 1024;  
+template<class Object>  
+class ThreadQueue  
+{  
+public:  
+    ThreadQueue();  
+    ~ThreadQueue();  
+public:  
+    bool Enter(Object *obj);  
+    Object* Out();  
+    bool IsEmpty();  
+    bool IsFull();  
+private:  
+    int front;  
+    int rear;  
+    int size;  
+    Object *list[QUEUESIZE];  
+    pthread_mutex_t queueMutex;  
+};  
+template<class Object>
+ThreadQueue<Object>::ThreadQueue()
+{  
+    front = rear = 0;
+    size = QUEUESIZE;
+} 
+template<class Object> 
+bool ThreadQueue<Object>::Enter(Object* obj)
+{
+    pthread_mutex_lock(&queueMutex);
+    if(IsFull())
+    {
+        cout << "Queue is full!" << endl; 
+        pthread_mutex_unlock(&queueMutex);
+  
+        return false;
+    }
+    list[rear] = obj;
+    rear = (rear + 1) % size;
+  
+    pthread_mutex_unlock(&queueMutex);
+  
+    return true;
+}
+template<class Object>
+Object* ThreadQueue<Object>::Out()
+{
+    Object* temp;
+    pthread_mutex_lock(&queueMutex);
+    if(IsEmpty())
+    {
+        pthread_mutex_unlock(&queueMutex);
+        return NULL;
+    }
+    temp = list[front];
+    front = (front + 1) % size;
+  
+    pthread_mutex_unlock(&queueMutex);
+  
+    return temp;
+}
+template<class Object>
+bool ThreadQueue<Object>::IsEmpty()
+{
+    if(rear == front)
+        return true;
+    else
+        return false;
+}
+template<class Object>
+bool ThreadQueue<Object>::IsFull()
+{
+    if((rear + 1) % size == front)
+        return true;
+    else
+        return false;
+} 
+template<class Object>
+ThreadQueue<Object>::~ThreadQueue()
+{
+    delete []list;
+}  
+
+struct Data  
+{  
+    char buf[1316];  
+    int size;
+};  
+  
 // pre-declare
 
 int proxy_hls2rtmp(std::string hls, std::string rtmp, int16_t program_number);
@@ -128,7 +228,6 @@ int main(int argc, char** argv)
     
     srs_trace("input:  %s", in_hls_url.c_str());
     srs_trace("output: %s", out_rtmp_url.c_str());
-    
     return proxy_hls2rtmp(in_hls_url, out_rtmp_url, program_number);
 }
 
@@ -145,58 +244,28 @@ virtual int on_aac_frame(char* frame, int frame_size, double duration) = 0;
 // the context to ingest hls stream.
 class SrsIngestSrsInput
 {
-private:
-    struct SrsTsPiece {
-        double duration;
-        std::string url;
-        std::string body;
-        
-        // should skip this ts?
-        bool skip;
-        // already sent to rtmp server?
-        bool sent;
-        // whether ts piece is dirty, remove if not update.
-        bool dirty;
-        
-        SrsTsPiece() {
-            skip = false;
-            sent = false;
-            dirty = false;
-        }
-        
-        int fetch(std::string m3u8);
-    };
+public:
+    ThreadQueue <Data> * mbuffer;
 private:
     SrsHttpUri* in_hls;
-    std::vector<SrsTsPiece*> pieces;
     int64_t next_connect_time;
 private:
     SrsStream* stream;
     SrsTsContext* context;
 public:
-    SrsIngestSrsInput(SrsHttpUri* hls, int16_t program_number) {
-        in_hls = hls;
+    SrsIngestSrsInput(int16_t program_number) {
         next_connect_time = 0;
         
         stream = new SrsStream();
         context = new SrsTsContext();
         context->program_number = program_number;
+        mbuffer  = new ThreadQueue<Data>();
     }
     virtual ~SrsIngestSrsInput() {
         srs_freep(stream);
         srs_freep(context);
-        
-        std::vector<SrsTsPiece*>::iterator it;
-        for (it = pieces.begin(); it != pieces.end(); ++it) {
-            SrsTsPiece* tp = *it;
-            srs_freep(tp);
-        }
-        pieces.clear();
+        srs_freep(mbuffer);
     }
-    /**
-     * parse the input hls live m3u8 index.
-     */
-    virtual int connect();
     /**
      * parse the ts and use hanler to process the message.
      */
@@ -207,93 +276,15 @@ private:
      */
     virtual int parseAac(ISrsAacHandler* handler, char* body, int nb_body, double duration);
     virtual int parseTs(ISrsTsHandler* handler, char* body, int nb_body);
-    /**
-     * parse the m3u8 specified by url.
-     */
-    virtual int parseM3u8(SrsHttpUri* url, double& td, double& duration);
-    /**
-     * find the ts piece by its url.
-     */
-    virtual SrsTsPiece* find_ts(string url);
-    /**
-     * set all ts to dirty.
-     */
-    virtual void dirty_all_ts();
-    /**
-     * fetch all ts body.
-     */
-    virtual int fetch_all_ts(bool fresh_m3u8);
-    /**
-     * remove all ts which is dirty.
-     */
-    virtual void remove_dirty();
 };
-
-int SrsIngestSrsInput::connect()
-{
-  //just bind udp socket
-    int ret = ERROR_SUCCESS;
-    
-    int64_t now = srs_update_system_time_ms();
-    if (now < next_connect_time) {
-        srs_trace("input hls wait for %dms", next_connect_time - now);
-        st_usleep((next_connect_time - now) * 1000);
-    }
-    
-    // set all ts to dirty.
-    dirty_all_ts();
-    
-    bool fresh_m3u8 = pieces.empty();
-    double td = 0.0;
-    double duration = 0.0;
-    if ((ret = parseM3u8(in_hls, td, duration)) != ERROR_SUCCESS) {
-        return ret;
-    }
-    
-    // fetch all ts.
-    if ((ret = fetch_all_ts(fresh_m3u8)) != ERROR_SUCCESS) {
-        srs_error("fetch all ts failed. ret=%d", ret);
-        return ret;
-    }
-    
-    // remove all dirty ts.
-    remove_dirty();
-    
-    srs_trace("fetch m3u8 ok, td=%.2f, duration=%.2f, pieces=%d", td, duration, pieces.size());
-    
-    return ret;
-}
 
 int SrsIngestSrsInput::parse(ISrsTsHandler* ts, ISrsAacHandler* aac)
 {
     int ret = ERROR_SUCCESS;
-    
-    for (int i = 0; i < (int)pieces.size(); i++) {
-        SrsTsPiece* tp = pieces.at(i);
-        
-        // sent only once.
-        if (tp->sent) {
-            continue;
-        }
-        tp->sent = true;
-        
-        if (tp->body.empty()) {
-            continue;
-        }
-        
-        srs_trace("proxy the ts to rtmp, ts=%s, duration=%.2f", tp->url.c_str(), tp->duration);
-        
-        if (srs_string_ends_with(tp->url, ".ts")) {
-            if ((ret = parseTs(ts, (char*)tp->body.data(), (int)tp->body.length())) != ERROR_SUCCESS) {
-                return ret;
-            }
-        } else if (srs_string_ends_with(tp->url, ".aac")) {
-            if ((ret = parseAac(aac, (char*)tp->body.data(), (int)tp->body.length(), tp->duration)) != ERROR_SUCCESS) {
-                return ret;
-            }
-        } else {
-            srs_warn("ignore unkown piece %s", tp->url.c_str());
-        }
+    Data *temp;  
+    while ((temp = mbuffer->Out()) != NULL) {
+        ret = parseTs(ts, temp->buf, temp->size);
+      delete temp;
     }
     
     return ret;
@@ -380,258 +371,6 @@ int SrsIngestSrsInput::parseAac(ISrsAacHandler* handler, char* body, int nb_body
     return handler->on_aac_frame(frame, frame_size, duration);
 }
 
-int SrsIngestSrsInput::parseM3u8(SrsHttpUri* url, double& td, double& duration)
-{
-    int ret = ERROR_SUCCESS;
-    
-    SrsHttpClient client;
-    srs_trace("parse input hls %s", url->get_url());
-    
-    if ((ret = client.initialize(url->get_host(), url->get_port())) != ERROR_SUCCESS) {
-        srs_error("connect to server failed. ret=%d", ret);
-        return ret;
-    }
-    
-    ISrsHttpMessage* msg = NULL;
-    if ((ret = client.get(url->get_path(), "", &msg)) != ERROR_SUCCESS) {
-        srs_error("HTTP GET %s failed. ret=%d", url->get_url(), ret);
-        return ret;
-    }
-    
-    srs_assert(msg);
-    SrsAutoFree(ISrsHttpMessage, msg);
-    
-    std::string body;
-    if ((ret = msg->body_read_all(body)) != ERROR_SUCCESS) {
-        srs_error("read m3u8 failed. ret=%d", ret);
-        return ret;
-    }
-    
-    if (body.empty()) {
-        srs_warn("ignore empty m3u8");
-        return ret;
-    }
-    
-    std::string ptl;
-    while (!body.empty()) {
-        size_t pos = string::npos;
-        
-        std::string line;
-        if ((pos = body.find("\n")) != string::npos) {
-            line = body.substr(0, pos);
-            body = body.substr(pos + 1);
-        } else {
-            line = body;
-            body = "";
-        }
-        
-        line = srs_string_replace(line, "\r", "");
-        line = srs_string_replace(line, " ", "");
-        
-        // #EXT-X-VERSION:3
-        // the version must be 3.0
-        if (srs_string_starts_with(line, "#EXT-X-VERSION:")) {
-            if (!srs_string_ends_with(line, ":3")) {
-                srs_warn("m3u8 3.0 required, actual is %s", line.c_str());
-            }
-            continue;
-        }
-        
-        // #EXT-X-PLAYLIST-TYPE:VOD
-        // the playlist type, vod or nothing.
-        if (srs_string_starts_with(line, "#EXT-X-PLAYLIST-TYPE:")) {
-            ptl = line;
-            continue;
-        }
-        
-        // #EXT-X-TARGETDURATION:12
-        // the target duration is required.
-        if (srs_string_starts_with(line, "#EXT-X-TARGETDURATION:")) {
-            td = ::atof(line.substr(string("#EXT-X-TARGETDURATION:").length()).c_str());
-        }
-        
-        // #EXT-X-ENDLIST
-        // parse completed.
-        if (line == "#EXT-X-ENDLIST") {
-            break;
-        }
-        
-        // #EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=73207,CODECS="mp4a.40.2"
-        if (srs_string_starts_with(line, "#EXT-X-STREAM-INF:")) {
-            if ((pos = body.find("\n")) == string::npos) {
-                srs_warn("m3u8 entry unexpected eof, inf=%s", line.c_str());
-                break;
-            }
-            
-            std::string m3u8_url = body.substr(0, pos);
-            body = body.substr(pos + 1);
-            
-            if (!srs_string_is_http(m3u8_url)) {
-                m3u8_url = srs_path_dirname(url->get_url()) + "/" + m3u8_url;
-            }
-            srs_trace("parse sub m3u8, url=%s", m3u8_url.c_str());
-            
-            if ((ret = url->initialize(m3u8_url)) != ERROR_SUCCESS) {
-                return ret;
-            }
-            
-            return parseM3u8(url, td, duration);
-        }
-        
-        // #EXTINF:11.401,
-        // livestream-5.ts
-        // parse each ts entry, expect current line is inf.
-        if (!srs_string_starts_with(line, "#EXTINF:")) {
-            continue;
-        }
-        
-        // expect next line is url.
-        std::string ts_url;
-        if ((pos = body.find("\n")) != string::npos) {
-            ts_url = body.substr(0, pos);
-            body = body.substr(pos + 1);
-        } else {
-            srs_warn("ts entry unexpected eof, inf=%s", line.c_str());
-            break;
-        }
-        
-        // parse the ts duration.
-        line = line.substr(string("#EXTINF:").length());
-        if ((pos = line.find(",")) != string::npos) {
-            line = line.substr(0, pos);
-        }
-        
-        double ts_duration = ::atof(line.c_str());
-        duration += ts_duration;
-        
-        SrsTsPiece* tp = find_ts(ts_url);
-        if (!tp) {
-            tp = new SrsTsPiece();
-            tp->url = ts_url;
-            tp->duration = ts_duration;
-            pieces.push_back(tp);
-        } else {
-            tp->dirty = false;
-        }
-    }
-    
-    return ret;
-}
-
-SrsIngestSrsInput::SrsTsPiece* SrsIngestSrsInput::find_ts(string url)
-{
-    std::vector<SrsTsPiece*>::iterator it;
-    for (it = pieces.begin(); it != pieces.end(); ++it) {
-        SrsTsPiece* tp = *it;
-        if (tp->url == url) {
-            return tp;
-        }
-    }
-    return NULL;
-}
-
-void SrsIngestSrsInput::dirty_all_ts()
-{
-    std::vector<SrsTsPiece*>::iterator it;
-    for (it = pieces.begin(); it != pieces.end(); ++it) {
-        SrsTsPiece* tp = *it;
-        tp->dirty = true;
-    }
-}
-
-int SrsIngestSrsInput::fetch_all_ts(bool fresh_m3u8)
-{
-    int ret = ERROR_SUCCESS;
-    
-    for (int i = 0; i < (int)pieces.size(); i++) {
-        SrsTsPiece* tp = pieces.at(i);
-        
-        // when skipped, ignore.
-        if (tp->skip) {
-            continue;
-        }
-        
-        // for the fresh m3u8, skip except the last one.
-        if (fresh_m3u8 && i != (int)pieces.size() - 1) {
-            tp->skip = true;
-            continue;
-        }
-        
-        if ((ret = tp->fetch(in_hls->get_url())) != ERROR_SUCCESS) {
-            srs_error("fetch ts %s for error. ret=%d", tp->url.c_str(), ret);
-            tp->skip = true;
-            return ret;
-        }
-        
-        // only wait for a duration of last piece.
-        if (i == (int)pieces.size() - 1) {
-            next_connect_time = srs_update_system_time_ms() + (int)tp->duration * 1000;
-        }
-    }
-    
-    return ret;
-}
-
-
-void SrsIngestSrsInput::remove_dirty()
-{
-    std::vector<SrsTsPiece*>::iterator it;
-    for (it = pieces.begin(); it != pieces.end();) {
-        SrsTsPiece* tp = *it;
-        
-        if (tp->dirty) {
-            srs_trace("erase dirty ts, url=%s, duration=%.2f", tp->url.c_str(), tp->duration);
-            srs_freep(tp);
-            it = pieces.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-int SrsIngestSrsInput::SrsTsPiece::fetch(string m3u8)
-{
-    int ret = ERROR_SUCCESS;
-    
-    if (skip || sent || !body.empty()) {
-        return ret;
-    }
-    
-    SrsHttpClient client;
-    
-    std::string ts_url = url;
-    if (!srs_string_is_http(ts_url)) {
-        ts_url = srs_path_dirname(m3u8) + "/" + url;
-    }
-    
-    SrsHttpUri uri;
-    if ((ret = uri.initialize(ts_url)) != ERROR_SUCCESS) {
-        return ret;
-    }
-    
-    // initialize the fresh http client.
-    if ((ret = client.initialize(uri.get_host(), uri.get_port()) != ERROR_SUCCESS)) {
-        return ret;
-    }
-    
-    ISrsHttpMessage* msg = NULL;
-    if ((ret = client.get(uri.get_path(), "", &msg)) != ERROR_SUCCESS) {
-        srs_error("HTTP GET %s failed. ret=%d", uri.get_url(), ret);
-        return ret;
-    }
-    
-    srs_assert(msg);
-    SrsAutoFree(ISrsHttpMessage, msg);
-    
-    if ((ret = msg->body_read_all(body)) != ERROR_SUCCESS) {
-        srs_error("read ts failed. ret=%d", ret);
-        return ret;
-    }
-    
-    srs_trace("fetch ts ok, duration=%.2f, url=%s, body=%dB", duration, url.c_str(), body.length());
-    
-    return ret;
-}
 
 // the context to output to rtmp server
 class SrsIngestSrsOutput : virtual public ISrsTsHandler, virtual public ISrsAacHandler
@@ -1347,12 +1086,11 @@ void SrsIngestSrsOutput::close()
 // the context for ingest hls stream.
 class SrsIngestSrsContext
 {
-private:
+public:
     SrsIngestSrsInput* ic;
     SrsIngestSrsOutput* oc;
-public:
-    SrsIngestSrsContext(SrsHttpUri* hls, SrsHttpUri* rtmp, int16_t program_number) {
-        ic = new SrsIngestSrsInput(hls, program_number);
+    SrsIngestSrsContext(SrsHttpUri* rtmp, int16_t program_number) {
+        ic = new SrsIngestSrsInput(program_number);
         oc = new SrsIngestSrsOutput(rtmp);
     }
     virtual ~SrsIngestSrsContext() {
@@ -1361,11 +1099,6 @@ public:
     }
     virtual int proxy() {
         int ret = ERROR_SUCCESS;
-        
-        if ((ret = ic->connect()) != ERROR_SUCCESS) {
-            srs_error("connect oc failed. ret=%d", ret);
-            return ret;
-        }
         
         if ((ret = oc->connect()) != ERROR_SUCCESS) {
             srs_error("connect ic failed. ret=%d", ret);
@@ -1385,6 +1118,86 @@ public:
         return ret;
     }
 };
+class udpRecv
+{
+public:
+    udpRecv();
+    virtual ~udpRecv();
+    int listen();
+    int skt;
+    void Recv();
+    static void* thread_fun(void* arg);
+    void startRecv();
+    void addHandler(SrsIngestSrsContext * p);
+private:
+    SrsIngestSrsContext* all[50];
+    int number;
+};
+
+udpRecv::udpRecv(){
+    number = 0;
+    skt= socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP );
+}
+
+udpRecv::~udpRecv(){
+}
+
+void udpRecv::addHandler(SrsIngestSrsContext * p){
+ all[number++] = p;
+}
+
+int udpRecv::listen(){
+    struct sockaddr_in local;
+    memset( &local, 0, sizeof(local) );
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = inet_addr("0.0.0.0");
+    local.sin_port = htons(1234);
+    return bind(skt, (struct sockaddr *)&local,    sizeof(local)) ;
+}
+
+void* udpRecv::thread_fun(void* arg)
+{
+   udpRecv *p = (udpRecv *) arg;
+   while (1)
+   p->Recv();
+}
+
+void udpRecv::startRecv(){
+   pthread_t tid;
+   pthread_create(&tid, NULL, thread_fun, this);
+   pthread_detach(tid);
+}
+
+void udpRecv::Recv(){
+    uint32_t slen ;
+
+    char buf[1316];
+    size_t size = sizeof(buf);
+
+    fd_set rfds;
+    struct timeval tv;
+    int retval;
+    tv.tv_sec = 0;
+    tv.tv_usec = 50 * 1000;
+
+    if (1) {
+    FD_ZERO(&rfds);
+    FD_SET(0, &rfds);
+    retval = select(1, &rfds, NULL, NULL, &tv);
+    if (retval == -1)
+       perror("select()");
+    else if (retval) {
+        slen = recvfrom(skt, buf, size, 0, NULL, 0);
+        for (int i =0;i<number;i++){
+            Data * d = new Data();  
+            d->size = slen;
+            memcpy(d->buf, buf, slen);
+            all[i]->ic->mbuffer->Enter(d);
+        }
+    }
+   }
+
+}
 
 int proxy_hls2rtmp(string hls, string rtmp, int16_t program_number)
 {
@@ -1396,22 +1209,19 @@ int proxy_hls2rtmp(string hls, string rtmp, int16_t program_number)
         return ret;
     }
     
-    SrsHttpUri hls_uri, rtmp_uri;
-    if ((ret = hls_uri.initialize(hls)) != ERROR_SUCCESS) {
-        srs_error("hls uri invalid. ret=%d", ret);
-        return ret;
-    }
+    SrsHttpUri rtmp_uri;
     if ((ret = rtmp_uri.initialize(rtmp)) != ERROR_SUCCESS) {
         srs_error("rtmp uri invalid. ret=%d", ret);
         return ret;
     }
     
-    SrsIngestSrsContext context(&hls_uri, &rtmp_uri, program_number);
+    SrsIngestSrsContext context(&rtmp_uri, program_number);
+    udpRecv *t = new udpRecv();
+    t->listen();
+    t->addHandler(&context);
+    t->startRecv();
     for (;;) {
-        if ((ret = context.proxy()) != ERROR_SUCCESS) {
-            srs_error("proxy hls to rtmp failed. ret=%d", ret);
-            return ret;
-        }
+        ret = context.proxy() ;
     }
     
     return ret;
