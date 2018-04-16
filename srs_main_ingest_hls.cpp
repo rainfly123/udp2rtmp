@@ -1184,8 +1184,8 @@ void udpRecv::Recv(){
     FD_ZERO(&rfds);
     FD_SET(0, &rfds);
     retval = select(1, &rfds, NULL, NULL, &tv);
-    if (retval == -1)
-       perror("select()");
+    if (retval <= 0)
+       usleep(10000);
     else if (retval) {
         slen = recvfrom(skt, buf, size, 0, NULL, 0);
         for (int i =0;i<number;i++){
