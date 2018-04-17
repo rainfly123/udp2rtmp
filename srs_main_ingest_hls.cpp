@@ -297,7 +297,6 @@ int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
             srs_error("mpegts: ignore parse ts packet failed. ret=%d", ret);
             return ret;
         }
-        srs_info("mpegts: parse ts packet completed");
     }
     srs_info("mpegts: parse udp packet completed");
     
@@ -509,17 +508,20 @@ int SrsIngestSrsOutput::parse_message_queue()
         SrsStream avs;
         if ((ret = avs.initialize(msg->payload->bytes(), msg->payload->length())) != ERROR_SUCCESS) {
             srs_error("mpegts: initialize av stream failed. ret=%d", ret);
+            srs_freep(msg); //xiechangcai add
             return ret;
         }
         
         // publish audio or video.
         if (msg->channel->stream == SrsTsStreamVideoH264) {
             if ((ret = on_ts_video(msg, &avs)) != ERROR_SUCCESS) {
+                srs_freep(msg); //xiechangcai add
                 return ret;
             }
         }
-        if (msg->channel->stream == SrsTsStreamAudioAAC) {
+        else if (msg->channel->stream == SrsTsStreamAudioAAC) {
             if ((ret = on_ts_audio(msg, &avs)) != ERROR_SUCCESS) {
+                srs_freep(msg); //xiechangcai add
                 return ret;
             }
         }
