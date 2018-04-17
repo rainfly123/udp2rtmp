@@ -239,13 +239,11 @@ public:
     ThreadQueue <Data> * mbuffer;
 private:
     SrsHttpUri* in_hls;
-    int64_t next_connect_time;
 private:
     SrsStream* stream;
     SrsTsContext* context;
 public:
     SrsIngestSrsInput(int16_t program_number) {
-        next_connect_time = 0;
         
         stream = new SrsStream();
         context = new SrsTsContext();
@@ -427,11 +425,6 @@ int SrsIngestSrsOutput::on_ts_message(SrsTsMessage* msg)
     // 14496-2 video stream number xxxx
     // ((stream_id >> 4) & 0x0f) == SrsTsPESStreamIdVideo
     
-    srs_info("<- "SRS_CONSTS_LOG_STREAM_CASTER" mpegts: got %s stream=%s, dts=%"PRId64", pts=%"PRId64", size=%d, us=%d, cc=%d, sid=%#x(%s-%d)",
-              (msg->channel->apply == SrsTsPidApplyVideo)? "Video":"Audio", srs_ts_stream2string(msg->channel->stream).c_str(),
-              msg->dts, msg->pts, msg->payload->length(), msg->packet->payload_unit_start_indicator, msg->continuity_counter, msg->sid,
-              msg->is_audio()? "A":msg->is_video()? "V":"N", msg->stream_number());
-    
     // When the audio SID is private stream 1, we use common audio.
     // @see https://github.com/ossrs/srs/issues/740
     if (msg->channel->apply == SrsTsPidApplyAudio && msg->sid == SrsTsPESStreamIdPrivateStream1) {
@@ -546,20 +539,24 @@ int SrsIngestSrsOutput::flush_message_queue()
         SrsStream avs;
         if ((ret = avs.initialize(msg->payload->bytes(), msg->payload->length())) != ERROR_SUCCESS) {
             srs_error("mpegts: initialize av stream failed. ret=%d", ret);
+            srs_freep(msg); //xiechangcai add
             return ret;
         }
         
         // publish audio or video.
         if (msg->channel->stream == SrsTsStreamVideoH264) {
             if ((ret = on_ts_video(msg, &avs)) != ERROR_SUCCESS) {
+                srs_freep(msg); //xiechangcai add
                 return ret;
             }
         }
         if (msg->channel->stream == SrsTsStreamAudioAAC) {
             if ((ret = on_ts_audio(msg, &avs)) != ERROR_SUCCESS) {
+                srs_freep(msg); //xiechangcai add
                 return ret;
             }
         }
+        srs_freep(msg); //xiechangcai add
     }
     
     return ret;

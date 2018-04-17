@@ -184,6 +184,7 @@ SrsTsMessage* SrsTsMessage::detach()
     cp->sid = sid;
     cp->PES_packet_length = PES_packet_length;
     cp->continuity_counter = continuity_counter;
+    srs_freep(cp->payload);//xiechangcai add
     cp->payload = payload;
     payload = NULL;
     return cp;
