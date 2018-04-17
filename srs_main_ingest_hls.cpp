@@ -81,12 +81,15 @@ private:
     int size;  
     Object *list[QUEUESIZE];  
     pthread_mutex_t queueMutex;  
+    pthread_cond_t queueCondx;  
 };  
 template<class Object>
 ThreadQueue<Object>::ThreadQueue()
 {  
     front = rear = 0;
     size = QUEUESIZE;
+    pthread_cond_init(&queueCondx, NULL);
+    pthread_mutex_init(&queueMutex, NULL);
 } 
 template<class Object> 
 bool ThreadQueue<Object>::Enter(Object* obj)
@@ -101,7 +104,7 @@ bool ThreadQueue<Object>::Enter(Object* obj)
     }
     list[rear] = obj;
     rear = (rear + 1) % size;
-  
+    pthread_cond_signal(&queueCondx); 
     pthread_mutex_unlock(&queueMutex);
   
     return true;
@@ -111,10 +114,9 @@ Object* ThreadQueue<Object>::Out()
 {
     Object* temp;
     pthread_mutex_lock(&queueMutex);
-    if(IsEmpty())
+    while (IsEmpty())
     {
-        pthread_mutex_unlock(&queueMutex);
-        return NULL;
+        pthread_cond_wait(&queueCondx, &queueMutex); 
     }
     temp = list[front];
     front = (front + 1) % size;
@@ -142,7 +144,6 @@ bool ThreadQueue<Object>::IsFull()
 template<class Object>
 ThreadQueue<Object>::~ThreadQueue()
 {
-    delete []list;
 }  
 
 struct Data  
