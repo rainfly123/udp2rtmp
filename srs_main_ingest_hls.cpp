@@ -232,16 +232,6 @@ int main(int argc, char** argv)
     return proxy_hls2rtmp(in_hls_url, out_rtmp_url, program_number);
 }
 
-class ISrsAacHandler
-{
-public:
-    /**
-     * handle the aac frame, which in ADTS format(starts with FFFx).
-     * @param duration the duration in seconds of frames.
-*/
-virtual int on_aac_frame(char* frame, int frame_size, double duration) = 0;
-};
-
 // the context to ingest hls stream.
 class SrsIngestSrsInput
 {
@@ -270,16 +260,15 @@ public:
     /**
      * parse the ts and use hanler to process the message.
      */
-    virtual int parse(ISrsTsHandler* ts, ISrsAacHandler* aac);
+    virtual int parse(ISrsTsHandler* ts);
 private:
     /**
      * parse the ts pieces body.
      */
-    virtual int parseAac(ISrsAacHandler* handler, char* body, int nb_body, double duration);
     virtual int parseTs(ISrsTsHandler* handler, char* body, int nb_body);
 };
 
-int SrsIngestSrsInput::parse(ISrsTsHandler* ts, ISrsAacHandler* aac)
+int SrsIngestSrsInput::parse(ISrsTsHandler* ts)
 {
     int ret = ERROR_SUCCESS;
     Data *temp;  
@@ -315,66 +304,8 @@ int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
     return ret;
 }
 
-int SrsIngestSrsInput::parseAac(ISrsAacHandler* handler, char* body, int nb_body, double duration)
-{
-    int ret = ERROR_SUCCESS;
-    
-    if ((ret = stream->initialize(body, nb_body)) != ERROR_SUCCESS) {
-        return ret;
-    }
-    
-    // atleast 2bytes.
-    if (!stream->require(3)) {
-        ret = ERROR_AAC_BYTES_INVALID;
-        srs_error("invalid aac, atleast 3bytes. ret=%d", ret);
-        return ret;
-    }
-    
-    u_int8_t id0 = (u_int8_t)body[0];
-    u_int8_t id1 = (u_int8_t)body[1];
-    u_int8_t id2 = (u_int8_t)body[2];
-    
-    // skip ID3.
-    if (id0 == 0x49 && id1 == 0x44 && id2 == 0x33) {
-        /*char id3[] = {
-            (char)0x49, (char)0x44, (char)0x33, // ID3
-            (char)0x03, (char)0x00, // version
-            (char)0x00, // flags
-            (char)0x00, (char)0x00, (char)0x00, (char)0x0a, // size
-            
-            (char)0x00, (char)0x00, (char)0x00, (char)0x00, // FrameID
-            (char)0x00, (char)0x00, (char)0x00, (char)0x00, // FrameSize
-            (char)0x00, (char)0x00 // Flags
-         };*/
-        // atleast 10 bytes.
-        if (!stream->require(10)) {
-            ret = ERROR_AAC_BYTES_INVALID;
-            srs_error("invalid aac ID3, atleast 10bytes. ret=%d", ret);
-            return ret;
-        }
-        
-        // ignore ID3 + version + flag.
-        stream->skip(6);
-        // read the size of ID3.
-        u_int32_t nb_id3 = stream->read_4bytes();
-        
-        // read body of ID3
-        if (!stream->require(nb_id3)) {
-            ret = ERROR_AAC_BYTES_INVALID;
-            srs_error("invalid aac ID3 body, required %dbytes. ret=%d", nb_id3, ret);
-            return ret;
-        }
-        stream->skip(nb_id3);
-    }
-    
-    char* frame = body + stream->pos();
-    int frame_size = nb_body - stream->pos();
-    return handler->on_aac_frame(frame, frame_size, duration);
-}
-
-
 // the context to output to rtmp server
-class SrsIngestSrsOutput : virtual public ISrsTsHandler, virtual public ISrsAacHandler
+class SrsIngestSrsOutput : virtual public ISrsTsHandler 
 {
 private:
     SrsHttpUri* out_rtmp;
@@ -432,11 +363,7 @@ public:
 // interface ISrsTsHandler
 public:
     virtual int on_ts_message(SrsTsMessage* msg);
-// interface IAacHandler
-public:
-    virtual int on_aac_frame(char* frame, int frame_size, double duration);
 private:
-    virtual int do_on_aac_frame(SrsStream* avs, double duration);
     virtual int parse_message_queue();
     virtual int on_ts_video(SrsTsMessage* msg, SrsStream* avs);
     virtual int write_h264_sps_pps(u_int32_t dts, u_int32_t pts);
@@ -536,78 +463,6 @@ int SrsIngestSrsOutput::on_ts_message(SrsTsMessage* msg)
     return ret;
 }
 
-int SrsIngestSrsOutput::on_aac_frame(char* frame, int frame_size, double duration)
-{
-    int ret = ERROR_SUCCESS;
-    
-    srs_trace("handle aac frames, size=%dB, duration=%.2f, dts=%"PRId64, frame_size, duration, raw_aac_dts);
-    
-    SrsStream stream;
-    if ((ret = stream.initialize(frame, frame_size)) != ERROR_SUCCESS) {
-        return ret;
-    }
-    
-    return do_on_aac_frame(&stream, duration);
-}
-
-int SrsIngestSrsOutput::do_on_aac_frame(SrsStream* avs, double duration)
-{
-    int ret = ERROR_SUCCESS;
-    
-    u_int32_t duration_ms = (u_int32_t)(duration * 1000);
-    
-    // ts tbn to flv tbn.
-    u_int32_t dts = (u_int32_t)raw_aac_dts;
-    raw_aac_dts += duration_ms;
-    
-    // got the next msg to calc the delta duration for each audio.
-    u_int32_t max_dts = dts + duration_ms;
-    
-    // send each frame.
-    while (!avs->empty()) {
-        char* frame = NULL;
-        int frame_size = 0;
-        SrsRawAacStreamCodec codec;
-        if ((ret = aac->adts_demux(avs, &frame, &frame_size, codec)) != ERROR_SUCCESS) {
-            return ret;
-        }
-        
-        // ignore invalid frame,
-        //  * atleast 1bytes for aac to decode the data.
-        if (frame_size <= 0) {
-            continue;
-        }
-        srs_info("mpegts: demux aac frame size=%d, dts=%d", frame_size, dts);
-        
-        // generate sh.
-        if (aac_specific_config.empty()) {
-            std::string sh;
-            if ((ret = aac->mux_sequence_header(&codec, sh)) != ERROR_SUCCESS) {
-                return ret;
-            }
-            aac_specific_config = sh;
-            
-            codec.aac_packet_type = 0;
-            
-            if ((ret = write_audio_raw_frame((char*)sh.data(), (int)sh.length(), &codec, dts)) != ERROR_SUCCESS) {
-                return ret;
-            }
-        }
-        
-        // audio raw data.
-        codec.aac_packet_type = 1;
-        if ((ret = write_audio_raw_frame(frame, frame_size, &codec, dts)) != ERROR_SUCCESS) {
-            return ret;
-        }
-        
-        // calc the delta of dts, when previous frame output.
-        u_int32_t delta = duration_ms / (avs->size() / frame_size);
-        dts = (u_int32_t)(srs_min(max_dts, dts + delta));
-    }
-    
-    return ret;
-}
-
 int SrsIngestSrsOutput::parse_message_queue()
 {
     int ret = ERROR_SUCCESS;
@@ -668,6 +523,7 @@ int SrsIngestSrsOutput::parse_message_queue()
                 return ret;
             }
         }
+       srs_freep(msg); //xiechangcai add
     }
     
     return ret;
@@ -1106,7 +962,7 @@ public:
             return ret;
         }
         
-        if ((ret = ic->parse(oc, oc)) != ERROR_SUCCESS) {
+        if ((ret = ic->parse(oc)) != ERROR_SUCCESS) {
             srs_error("proxy ts to rtmp failed. ret=%d", ret);
             return ret;
         }
