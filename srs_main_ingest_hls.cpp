@@ -173,6 +173,7 @@ SrsServer* _srs_server = NULL;
 int main(int argc, char** argv) 
 {
     // TODO: support both little and big endian.
+    daemon(0,0);
     srs_assert(srs_is_little_endian());
     
     // directly failed when compile limited.
