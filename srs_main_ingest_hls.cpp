@@ -154,7 +154,7 @@ struct Data
   
 // pre-declare
 
-int proxy_hls2rtmp(std::string hls, std::string rtmp, int16_t program_number);
+int proxy_hls2rtmp(std::string rtmp, int16_t program_number, int16_t port);
 // for the main objects(server, config, log, context),
 // never subscribe handler in constructor,
 // instead, subscribe handler in initialize method.
@@ -190,8 +190,9 @@ int main(int argc, char** argv)
     srs_trace("srs_ingest_hls base on %s, to ingest hls live to srs", RTMP_SIG_SRS_SERVER);
     
     // parse user options.
-    std::string in_hls_url, out_rtmp_url;
+    std::string out_rtmp_url;
     uint16_t program_number;
+    uint16_t port = 0 ;
     for (int opt = 0; opt < argc; opt++) {
         srs_trace("argv[%d]=%s", opt, argv[opt]);
     }
@@ -208,28 +209,26 @@ int main(int argc, char** argv)
         
         // parse according the option name.
         switch (p[1]) {
-            case 'i': in_hls_url = argv[opt + 1]; break;
+            case 'i': port = atoi(argv[opt + 1]); break;
             case 'y': out_rtmp_url = argv[opt + 1]; break;
             case 'p': program_number = atoi(argv[opt + 1]); break;
             default: break;
         }
     }
     
-    if (in_hls_url.empty() || out_rtmp_url.empty()) {
-        printf("ingest hls live stream and publish to RTMP server\n"
-               "Usage: %s <-i in_hls_url> <-y out_rtmp_url> <-p port>\n"
-               "   in_hls_url      input hls url, ingest from this m3u8.\n"
+    if (port == 0 || out_rtmp_url.empty()) {
+        printf("ingest udp live stream and publish to RTMP server\n"
+               "Usage: %s <-i port > <-y out_rtmp_url> <-p program_number>\n"
+               "   port   listen port receive data.\n"
                "   out_rtmp_url    output rtmp url, publish to this url.\n"
                "For example:\n"
-               "   %s -i http://127.0.0.1:8080/live/livestream.m3u8 -y rtmp://127.0.0.1/live/ingest_hls\n"
-               "   %s -i http://ossrs.net/live/livestream.m3u8 -y rtmp://127.0.0.1/live/ingest_hls\n",
-               argv[0], argv[0], argv[0]);
+               "   %s -i 1234 -y rtmp://127.0.0.1/live/ingest -p 1\n",
+               argv[0], argv[0]);
         exit(-1);
     }
     
-    srs_trace("input:  %s", in_hls_url.c_str());
     srs_trace("output: %s", out_rtmp_url.c_str());
-    return proxy_hls2rtmp(in_hls_url, out_rtmp_url, program_number);
+    return proxy_hls2rtmp(out_rtmp_url, program_number, port);
 }
 
 // the context to ingest hls stream.
@@ -979,7 +978,7 @@ class udpRecv
 public:
     udpRecv();
     virtual ~udpRecv();
-    int listen();
+    int listen(uint16_t port);
     int skt;
     void Recv();
     static void* thread_fun(void* arg);
@@ -1002,12 +1001,12 @@ void udpRecv::addHandler(SrsIngestSrsContext * p){
  all[number++] = p;
 }
 
-int udpRecv::listen(){
+int udpRecv::listen(uint16_t port){
     struct sockaddr_in local;
     memset( &local, 0, sizeof(local) );
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = inet_addr("0.0.0.0");
-    local.sin_port = htons(1234);
+    local.sin_port = htons(port);
     return bind(skt, (struct sockaddr *)&local,    sizeof(local)) ;
 }
 
@@ -1055,7 +1054,7 @@ void udpRecv::Recv(){
 
 }
 
-int proxy_hls2rtmp(string hls, string rtmp, int16_t program_number)
+int proxy_hls2rtmp(string rtmp, int16_t program_number, int16_t port)
 {
     int ret = ERROR_SUCCESS;
     
@@ -1073,7 +1072,7 @@ int proxy_hls2rtmp(string hls, string rtmp, int16_t program_number)
     
     SrsIngestSrsContext context(&rtmp_uri, program_number);
     udpRecv *t = new udpRecv();
-    t->listen();
+    t->listen(port);
     t->addHandler(&context);
     t->startRecv();
     for (;;) {
