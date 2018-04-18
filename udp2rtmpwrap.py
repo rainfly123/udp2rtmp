@@ -27,7 +27,7 @@ if __name__ == '__main__':
         dest  = channel['dest']
         number = channel['program_number'] 
         port = random.randint(50000, 60000)
-        args = ["udp2rtmp", "-i", port, "-y", dest,  "-p", str(number)]
+        args = ["udp2rtmp", "-i", str(port), "-y", dest,  "-p", str(number)]
         commands.append(args)
     for chan in commands:
         print chan
