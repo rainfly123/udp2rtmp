@@ -1036,10 +1036,10 @@ void udpRecv::Recv(){
     tv.tv_sec = 0;
     tv.tv_usec = 50 * 1000;
 
-    if (1) {
+    while (1) {
     FD_ZERO(&rfds);
-    FD_SET(0, &rfds);
-    retval = select(1, &rfds, NULL, NULL, &tv);
+    FD_SET(skt, &rfds);
+    retval = select(skt + 1, &rfds, NULL, NULL, &tv);
     if (retval <= 0)
        usleep(10000);
     else if (retval) {
