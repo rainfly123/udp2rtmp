@@ -3,7 +3,12 @@ import json
 import os
 import sys
 import daemon
+import subprocess
 import socket
+import random
+
+commands = []
+
 
 if __name__ == '__main__':
     if len(sys.argv) <= 1:
@@ -19,5 +24,14 @@ if __name__ == '__main__':
     all_config = json.loads(data)
     print all_config["udp"]
     for channel in all_config["channels"]:
-        print channel
+        dest  = channel['dest']
+        number = channel['program_number'] 
+        port = random.randint(50000, 60000)
+        args = ["udp2rtmp", "-i", port, "-y", dest,  "-p", str(number)]
+        commands.append(args)
+    for chan in commands:
+        print chan
+        subprocess.call(chan)
+    while True:
+        pass
 
