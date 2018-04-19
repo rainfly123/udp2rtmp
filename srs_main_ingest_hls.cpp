@@ -173,7 +173,7 @@ SrsServer* _srs_server = NULL;
 int main(int argc, char** argv) 
 {
     // TODO: support both little and big endian.
-    daemon(0,0);
+    daemon(1,0);
     srs_assert(srs_is_little_endian());
     
     // directly failed when compile limited.
@@ -1033,6 +1033,7 @@ void udpRecv::Recv(){
     fd_set rfds;
     struct timeval tv;
     int retval;
+    bool val;
     tv.tv_sec = 0;
     tv.tv_usec = 50 * 1000;
 
@@ -1048,7 +1049,9 @@ void udpRecv::Recv(){
             Data * d = new Data();  
             d->size = slen;
             memcpy(d->buf, buf, slen);
-            all[i]->ic->mbuffer->Enter(d);
+            if ((val = all[i]->ic->mbuffer->Enter(d)) != true) {
+                delete d;
+            }
         }
     }
    }
