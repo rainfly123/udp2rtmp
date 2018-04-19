@@ -23,6 +23,7 @@ just start one process, (all of programs using the same Process)
 
 if you want to  publish more than one RTMP stream using the same program in MPEG-TS:
 just write one more config item in config file with the same program_number
+
 For example:
 1020 rtmp://127.0.0.1/cctv2/live
 1020 rtmp://127.0.0.1/cctv3/live
