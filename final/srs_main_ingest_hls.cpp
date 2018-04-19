@@ -964,6 +964,7 @@ void udpRecv::Recv(){
     fd_set rfds;
     struct timeval tv;
     int retval;
+    bool val;
     tv.tv_sec = 0;
     tv.tv_usec = 50 * 1000;
 
@@ -979,7 +980,9 @@ void udpRecv::Recv(){
             Data * d = new Data();  
             d->size = slen;
             memcpy(d->buf, buf, slen);
-            all[i]->ic->mbuffer->Enter(d);
+            if ((val = all[i]->ic->mbuffer->Enter(d)) != true){
+                delete d;
+            }
         }
     }
    }
