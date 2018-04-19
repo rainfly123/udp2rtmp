@@ -16,7 +16,9 @@ just start one process, (all of programs using the same Process)
 
 # About config file
 #program_number rtmp_url     don't care this is comment
-1010 rtmp://127.0.0.1/cctv1/live   1010 is program number in PAT tble (ISO13818-1) ,the following rtmp URL is publish address
+
+1010 rtmp://127.0.0.1/cctv1/live   
+1010 is program number in PAT tble (ISO13818-1) ,the following rtmp URL is publish address
 
 
 if you want to  publish more than one RTMP stream using the same program in MPEG-TS:
