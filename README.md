@@ -25,11 +25,14 @@ if you want to  publish more than one RTMP stream using the same program in MPEG
 just write one more config item in config file with the same program_number
 
 For example:
+
 1020 rtmp://127.0.0.1/cctv2/live
+
 1020 rtmp://127.0.0.1/cctv3/live
 
 you can find me through Wechat.
+
 any amount of donation is appreciated !
 
 
-![wx](https://github.com/rainfly123/udp2rtmp/blob/master/wx.jpg){:height="50%" width="50%"}
+![wx](https://github.com/rainfly123/udp2rtmp/blob/master/wx.jpg)
