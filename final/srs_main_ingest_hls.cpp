@@ -159,8 +159,9 @@ ThreadQueue<Object>::~ThreadQueue()
 
 struct Data  
 {  
-    char buf[1316];  
-    int size;
+    char buf[1532];  
+    uint16_t size;
+    uint16_t refer;
 };  
   
 // the context to ingest hls stream.
@@ -203,7 +204,9 @@ int SrsIngestSrsInput::parse(ISrsTsHandler* ts)
     Data *temp;  
     while ((temp = mbuffer->Out()) != NULL) {
         ret = parseTs(ts, temp->buf, temp->size);
-      delete temp;
+        temp->refer -= 1;
+        if (temp->refer == 0)
+           delete temp;
     }
     
     return ret;
@@ -889,6 +892,13 @@ public:
         
         if ((ret = oc->connect()) != ERROR_SUCCESS) {
             srs_error("connect ic failed. ret=%d", ret);
+            //clear the memory 
+            Data *temp;  
+            while ((temp = ic->mbuffer->Out()) != NULL) {
+                temp->refer -= 1;
+                if (temp->refer == 0)
+                   delete temp;
+            }
             return ret;
         }
         
@@ -958,7 +968,7 @@ void udpRecv::startRecv(){
 void udpRecv::Recv(){
     uint32_t slen ;
 
-    char buf[1316];
+    char buf[1532];
     size_t size = sizeof(buf);
 
     fd_set rfds;
@@ -976,12 +986,16 @@ void udpRecv::Recv(){
        usleep(10000);
     else if (retval) {
         slen = recvfrom(skt, buf, size, 0, NULL, 0);
-        for (int i =0;i<number;i++){
-            Data * d = new Data();  
-            d->size = slen;
-            memcpy(d->buf, buf, slen);
-            if ((val = all[i]->ic->mbuffer->Enter(d)) != true) {
-                delete d;
+        if (slen > 0) {
+            Data * piece = new Data();  
+            piece->size = slen;
+            piece->refer = number;
+            memcpy(piece->buf, buf, slen);
+
+            for (int i = 0;i < number; i++) {
+               if ((val = all[i]->ic->mbuffer->Enter(piece)) != true) {
+                   piece->refer -= 1;
+               }
             }
         }
     }
