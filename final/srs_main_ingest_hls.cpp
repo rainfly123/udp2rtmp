@@ -1066,7 +1066,7 @@ int main(int argc, char** argv)
       uint16_t program_number;
      };
      Channels all[50];
-     memset(all, 0, sizeof(all));
+     //memset(all, 0, sizeof(all));
      ifstream fin (config_file, ios::in);  
      string s;  
      int which = 0;
