@@ -312,10 +312,12 @@ public:
      * flush the message queue when all ts parsed.
      */
     virtual int flush_message_queue();
+
+    virtual void close();
+
 private:
     virtual int connect_app(std::string ep_server, std::string ep_port);
     // close the connected io and rtmp to ready to be re-connect.
-    virtual void close();
 };
 
 int SrsIngestSrsOutput::on_ts_message(SrsTsMessage* msg)
@@ -904,11 +906,13 @@ public:
         
         if ((ret = ic->parse(oc)) != ERROR_SUCCESS) {
             srs_error("proxy ts to rtmp failed. ret=%d", ret);
+            oc->close();
             return ret;
         }
         
         if ((ret = oc->flush_message_queue()) != ERROR_SUCCESS) {
             srs_error("flush oc message failed. ret=%d", ret);
+            oc->close();
             return ret;
         }
         
