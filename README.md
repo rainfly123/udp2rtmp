@@ -2,7 +2,8 @@
 Used to receive MPTS(Multiple Program Transport Stream) from  UDP , demux it , 
 and then publish SPTS(Single Program Transport Stream) to RTMP server, providing RTMP viewing method.
 
-this codes are from SRS (Simple-Rtmp-Server) [Take a look](https://github.com/ossrs/srs)
+this codes are based SRS (Simple-Rtmp-Server) [Take a look](https://github.com/ossrs/srs)
+exactly SRS v2.0.243 
 and I changed about 500 lines , fixed some bugs .
 If you want to use it ,just overwrite the same files in SRS and make SRS
 the executable file is located in objs/srs_ingest_hls  (maybe :) )
