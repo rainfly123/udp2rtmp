@@ -34,8 +34,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <fcntl.h>
-
 
 using namespace std;
 
@@ -64,9 +62,113 @@ using namespace std;
 #include <srs_app_thread.hpp>
 #include <srs_app_listener.hpp>
 
+using std::cout;  
+using std::endl;  
+const int QUEUESIZE = 1024;  
+template<class Object>  
+class ThreadQueue  
+{  
+public:  
+    ThreadQueue();  
+    ~ThreadQueue();  
+public:  
+    bool Enter(Object *obj);  
+    Object* Out();  
+    bool IsEmpty();  
+    bool IsFull();  
+private:  
+    int front;  
+    int rear;  
+    int size;  
+    Object *list[QUEUESIZE];  
+    pthread_mutex_t queueMutex;  
+    pthread_cond_t queueCondx;  
+};  
+template<class Object>
+ThreadQueue<Object>::ThreadQueue()
+{  
+    front = rear = 0;
+    size = QUEUESIZE;
+    pthread_cond_init(&queueCondx, NULL);
+    pthread_mutex_init(&queueMutex, NULL);
+} 
+template<class Object> 
+bool ThreadQueue<Object>::Enter(Object* obj)
+{
+    pthread_mutex_lock(&queueMutex);
+    if(IsFull())
+    {
+        cout << "Queue is full!" << endl; 
+        pthread_mutex_unlock(&queueMutex);
+  
+        return false;
+    }
+    list[rear] = obj;
+    rear = (rear + 1) % size;
+    pthread_cond_signal(&queueCondx); 
+    pthread_mutex_unlock(&queueMutex);
+  
+    return true;
+}
+template<class Object>
+Object* ThreadQueue<Object>::Out()
+{
+    Object* temp;
+    struct timespec abstime;
+    struct timeval now;
+
+    pthread_mutex_lock(&queueMutex);
+    if (IsEmpty()) {
+        gettimeofday(&now, NULL);
+        abstime.tv_sec = now.tv_sec;
+        abstime.tv_nsec = now.tv_usec * 1000;
+        pthread_cond_timedwait(&queueCondx, &queueMutex, &abstime); 
+        if (IsEmpty()) {
+            //time out
+            pthread_mutex_unlock(&queueMutex);
+            return NULL;
+         }
+    }
+    temp = list[front];
+    front = (front + 1) % size;
+  
+    pthread_mutex_unlock(&queueMutex);
+  
+    return temp;
+}
+template<class Object>
+bool ThreadQueue<Object>::IsEmpty()
+{
+    if(rear == front)
+        return true;
+    else
+        return false;
+}
+template<class Object>
+bool ThreadQueue<Object>::IsFull()
+{
+    if((rear + 1) % size == front)
+        return true;
+    else
+        return false;
+} 
+template<class Object>
+ThreadQueue<Object>::~ThreadQueue()
+{
+}  
+
+struct Data  
+{  
+    char buf[1328];  
+    uint16_t size;
+    uint16_t refer;
+};  
+  
 // the context to ingest hls stream.
 class SrsIngestSrsInput
 {
+public:
+    ThreadQueue <Data> * mbuffer;
 private:
     SrsHttpUri* in_hls;
 private:
@@ -78,18 +180,43 @@ public:
         stream = new SrsStream();
         context = new SrsTsContext();
         context->program_number = program_number;
+        mbuffer  = new ThreadQueue<Data>();
     }
     virtual ~SrsIngestSrsInput() {
         srs_freep(stream);
         srs_freep(context);
+        srs_freep(mbuffer);
     }
+    /**
+     * parse the ts and use hanler to process the message.
+     */
+    virtual int parse(ISrsTsHandler* ts);
+private:
+    /**
+     * parse the ts pieces body.
+     */
     virtual int parseTs(ISrsTsHandler* handler, char* body, int nb_body);
 };
+
+int SrsIngestSrsInput::parse(ISrsTsHandler* ts)
+{
+    int ret = ERROR_SUCCESS;
+    Data *temp;  
+    while ((temp = mbuffer->Out()) != NULL) {
+        ret = parseTs(ts, temp->buf, temp->size);
+        temp->refer -= 1;
+        if (temp->refer == 0)
+           delete temp;
+    }
+    
+    return ret;
+}
 
 int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
 {
     int ret = ERROR_SUCCESS;
-
+    
+    // use stream to parse ts packet.
     int nb_packet =  (int)nb_body / SRS_TS_PACKET_SIZE;
     for (int i = 0; i < nb_packet; i++) {
         char* p = (char*)body + (i * SRS_TS_PACKET_SIZE);
@@ -103,6 +230,7 @@ int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
             return ret;
         }
     }
+    srs_info("mpegts: parse udp packet completed");
     
     return ret;
 }
@@ -761,15 +889,22 @@ public:
         srs_freep(ic);
         srs_freep(oc);
     }
-    virtual int proxy(char* body, int nb_body) {
+    virtual int proxy() {
         int ret = ERROR_SUCCESS;
         
         if ((ret = oc->connect()) != ERROR_SUCCESS) {
             srs_error("connect ic failed. ret=%d", ret);
+            //clear the memory 
+            Data *temp;  
+            while ((temp = ic->mbuffer->Out()) != NULL) {
+                temp->refer -= 1;
+                if (temp->refer == 0)
+                   delete temp;
+            }
             return ret;
         }
         
-        if ((ret = ic->parseTs(oc, body, nb_body)) != ERROR_SUCCESS) {
+        if ((ret = ic->parse(oc)) != ERROR_SUCCESS) {
             srs_error("proxy ts to rtmp failed. ret=%d", ret);
             oc->close();
             return ret;
@@ -790,18 +925,26 @@ public:
     udpRecv();
     virtual ~udpRecv();
     int listen(uint16_t port);
-    int Recv(char *body, int nb_body);
-private:
     int skt;
+    void Recv();
+    static void* thread_fun(void* arg);
+    void startRecv();
+    void addHandler(SrsIngestSrsContext * p);
+private:
+    SrsIngestSrsContext* all[50];
+    int number;
 };
 
 udpRecv::udpRecv(){
-    skt = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP );
-    int flags = fcntl(skt, F_GETFL, 0);
-    fcntl(skt, F_SETFL, flags|O_NONBLOCK);
+    number = 0;
+    skt= socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 }
 
 udpRecv::~udpRecv(){
+}
+
+void udpRecv::addHandler(SrsIngestSrsContext * p){
+ all[number++] = p;
 }
 
 int udpRecv::listen(uint16_t port){
@@ -813,11 +956,24 @@ int udpRecv::listen(uint16_t port){
     return bind(skt, (struct sockaddr *)&local,    sizeof(local)) ;
 }
 
-int udpRecv::Recv(char *body, int nb_body){
-    int slen ;
+void* udpRecv::thread_fun(void* arg)
+{
+   udpRecv *p = (udpRecv *) arg;
+   while (1)
+   p->Recv();
+}
 
-    char * buf = body;
-    size_t size = nb_body;
+void udpRecv::startRecv(){
+   pthread_t tid;
+   pthread_create(&tid, NULL, thread_fun, this);
+   pthread_detach(tid);
+}
+
+void udpRecv::Recv(){
+    uint32_t slen ;
+
+    char buf[1532];
+    size_t size = sizeof(buf);
 
     fd_set rfds;
     struct timeval tv;
@@ -835,14 +991,23 @@ int udpRecv::Recv(char *body, int nb_body){
     else if (retval) {
         slen = recvfrom(skt, buf, size, 0, NULL, 0);
         if (slen > 0) {
-            return slen;
+            Data * piece = new Data();  
+            piece->size = slen;
+            piece->refer = number;
+            memcpy(piece->buf, buf, slen);
+
+            for (int i = 0;i < number; i++) {
+               if ((val = all[i]->ic->mbuffer->Enter(piece)) != true) {
+                   piece->refer -= 1;
+               }
+            }
         }
     }
    }
 
 }
 
-SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number)
+SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number,  udpRecv *recv)
 {
     int ret = ERROR_SUCCESS;
     
@@ -854,6 +1019,7 @@ SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number)
     }
     
     SrsIngestSrsContext * context = new SrsIngestSrsContext (rtmp_uri, program_number);
+    recv->addHandler(context);
     return context;
 }
 
@@ -956,17 +1122,14 @@ int main(int argc, char** argv)
         srs_error("init st failed");
     }
     for (c = 0; c < which; c++) {
-       channels[c] = proxy_hls2rtmp(all[c].rtmp, all[c].program_number);
+       channels[c] = proxy_hls2rtmp(all[c].rtmp, all[c].program_number, recv);
     }
 
-    char buffer[1316];
-    int nb = sizeof(buffer);
-    int slen;
+    recv->startRecv();
     while (1) {
-    slen = recv->Recv(buffer, nb);
     for (c = 0; c < which; c++) {
         if (channels[c] != NULL)
-          channels[c]->proxy(buffer, slen) ;
+          channels[c]->proxy() ;
     }
    }
 }
