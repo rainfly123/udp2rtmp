@@ -64,12 +64,6 @@ using namespace std;
 
 using std::cout;  
 using std::endl;  
-
-ISrsLog* _srs_log = new SrsFastLog();
-ISrsThreadContext* _srs_context = new SrsThreadContext();
-SrsConfig* _srs_config = NULL;
-SrsServer* _srs_server = NULL;
-
 const int QUEUESIZE = 1024;  
 template<class Object>  
 class ThreadQueue  
@@ -106,6 +100,7 @@ bool ThreadQueue<Object>::Enter(Object* obj)
     {
         cout << "Queue is full!" << endl; 
         pthread_mutex_unlock(&queueMutex);
+  
         return false;
     }
     list[rear] = obj;
@@ -166,12 +161,14 @@ struct Data
 {  
     char buf[1328];  
     uint16_t size;
+    uint16_t refer;
 };  
   
-ThreadQueue <Data> * gbuffer;
-
+// the context to ingest hls stream.
 class SrsIngestSrsInput
 {
+public:
+    ThreadQueue <Data> * mbuffer;
 private:
     SrsHttpUri* in_hls;
 private:
@@ -183,16 +180,37 @@ public:
         stream = new SrsStream();
         context = new SrsTsContext();
         context->program_number = program_number;
+        mbuffer  = new ThreadQueue<Data>();
     }
     virtual ~SrsIngestSrsInput() {
         srs_freep(stream);
         srs_freep(context);
+        srs_freep(mbuffer);
     }
+    /**
+     * parse the ts and use hanler to process the message.
+     */
+    virtual int parse(ISrsTsHandler* ts);
+private:
     /**
      * parse the ts pieces body.
      */
     virtual int parseTs(ISrsTsHandler* handler, char* body, int nb_body);
 };
+
+int SrsIngestSrsInput::parse(ISrsTsHandler* ts)
+{
+    int ret = ERROR_SUCCESS;
+    Data *temp;  
+    while ((temp = mbuffer->Out()) != NULL) {
+        ret = parseTs(ts, temp->buf, temp->size);
+        temp->refer -= 1;
+        if (temp->refer == 0)
+           delete temp;
+    }
+    
+    return ret;
+}
 
 int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
 {
@@ -212,6 +230,7 @@ int SrsIngestSrsInput::parseTs(ISrsTsHandler* handler, char* body, int nb_body)
             return ret;
         }
     }
+    srs_info("mpegts: parse udp packet completed");
     
     return ret;
 }
@@ -870,15 +889,22 @@ public:
         srs_freep(ic);
         srs_freep(oc);
     }
-    virtual int proxy(char* body, int nb_body) {
+    virtual int proxy() {
         int ret = ERROR_SUCCESS;
         
         if ((ret = oc->connect()) != ERROR_SUCCESS) {
             srs_error("connect ic failed. ret=%d", ret);
+            //clear the memory 
+            Data *temp;  
+            while ((temp = ic->mbuffer->Out()) != NULL) {
+                temp->refer -= 1;
+                if (temp->refer == 0)
+                   delete temp;
+            }
             return ret;
         }
         
-        if ((ret = ic->parseTs(oc, body, nb_body)) != ERROR_SUCCESS) {
+        if ((ret = ic->parse(oc)) != ERROR_SUCCESS) {
             srs_error("proxy ts to rtmp failed. ret=%d", ret);
             oc->close();
             return ret;
@@ -903,15 +929,23 @@ public:
     void Recv();
     static void* thread_fun(void* arg);
     void startRecv();
+    void addHandler(SrsIngestSrsContext * p);
+private:
+    SrsIngestSrsContext* all[50];
+    int number;
 };
 
 udpRecv::udpRecv(){
+    number = 0;
     skt= socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 }
 
 udpRecv::~udpRecv(){
 }
 
+void udpRecv::addHandler(SrsIngestSrsContext * p){
+ all[number++] = p;
+}
 
 int udpRecv::listen(uint16_t port){
     struct sockaddr_in local;
@@ -959,9 +993,13 @@ void udpRecv::Recv(){
         if (slen > 0) {
             Data * piece = new Data();  
             piece->size = slen;
+            piece->refer = number;
             memcpy(piece->buf, buf, slen);
-            if ((val = gbuffer->Enter(piece)) != true) {
-                srs_trace("Buffer is full !!!");
+
+            for (int i = 0;i < number; i++) {
+               if ((val = all[i]->ic->mbuffer->Enter(piece)) != true) {
+                   piece->refer -= 1;
+               }
             }
         }
     }
@@ -969,7 +1007,7 @@ void udpRecv::Recv(){
 
 }
 
-SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number)
+SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number,  udpRecv *recv)
 {
     int ret = ERROR_SUCCESS;
     
@@ -981,17 +1019,20 @@ SrsIngestSrsContext * proxy_hls2rtmp(string rtmp, int16_t program_number)
     }
     
     SrsIngestSrsContext * context = new SrsIngestSrsContext (rtmp_uri, program_number);
+    recv->addHandler(context);
     return context;
 }
 
+ISrsLog* _srs_log = new SrsFastLog();
+ISrsThreadContext* _srs_context = new SrsThreadContext();
+// app module.
+SrsConfig* _srs_config = NULL;
+SrsServer* _srs_server = NULL;
 
 int main(int argc, char** argv) 
 {
     // TODO: support both little and big endian.
     //daemon(1,0);
-
-    gbuffer  = new ThreadQueue<Data>();
-
     srs_assert(srs_is_little_endian());
     
     // directly failed when compile limited.
@@ -1081,20 +1122,15 @@ int main(int argc, char** argv)
         srs_error("init st failed");
     }
     for (c = 0; c < which; c++) {
-       channels[c] = proxy_hls2rtmp(all[c].rtmp, all[c].program_number);
+       channels[c] = proxy_hls2rtmp(all[c].rtmp, all[c].program_number, recv);
     }
 
     recv->startRecv();
     while (1) {
-        Data *temp;  
-        temp = gbuffer->Out();
-        if (temp != NULL) {
-            for (c = 0; c < which; c++) {
-                  if (channels[c] != NULL)
-                      channels[c]->proxy(temp->buf, temp->size) ;
-            }
-            delete temp;
-        }
+    for (c = 0; c < which; c++) {
+        if (channels[c] != NULL)
+          channels[c]->proxy() ;
+    }
    }
 }
 
