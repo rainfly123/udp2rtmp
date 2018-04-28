@@ -4,16 +4,20 @@ and then publish SPTS(Single Program Transport Stream) to RTMP server, providing
 
 this codes are based SRS (Simple-Rtmp-Server) [Take a look](https://github.com/ossrs/srs)
 exactly SRS v2.0.243 
-and I changed about 500 lines , fixed some bugs .
-If you want to use it ,just overwrite the same files in SRS and make SRS
-the executable file is located in objs/srs_ingest_hls  (maybe :) )
+and I changed about 500 lines codes , fixed some bugs .
+If you want to use it ,just overwrite the same files in SRS and copy Makefile to SRS's objs directory
+make SRS
+the executable file is located in objs/udp2rtmp (maybe :) )
 
 # NOTICE
 files outside the directory "final"
 is using Python wrap , it will start several Process(each program using one Process ,what a shame)
 
 files inside the directory "final"
-just start one process, (all of programs using the same Process)
+just start one process, (all of programs using the same Process),this is recommended
+
+first of all , you should Install jemalloc 
+(only on Centos, there are memory leaks, if use jemalloc, the problem disappear)
 
 # About config file
 #program_number rtmp_url     don't care this is comment
