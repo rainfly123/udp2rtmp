@@ -868,7 +868,7 @@ void SrsIngestSrsOutput::close()
 {
     srs_trace("close output=%s", out_rtmp->get_url());
     h264_sps_pps_sent = false;
-    
+    aac_specific_config.clear();
     srs_freep(client);
     srs_freep(io);
     srs_freep(req);
