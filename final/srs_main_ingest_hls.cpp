@@ -504,7 +504,7 @@ int SrsIngestSrsOutput::on_ts_video(SrsTsMessage* msg, SrsStream* avs)
     
     // ts tbn to flv tbn.
     u_int32_t dts = (u_int32_t)(msg->dts / 90);
-    u_int32_t pts = (u_int32_t)(msg->dts / 90);
+    u_int32_t pts = (u_int32_t)(msg->pts / 90);
     
     std::string ibps;
     SrsCodecVideoAVCFrame frame_type = SrsCodecVideoAVCFrameInterFrame;
